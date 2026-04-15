@@ -1,62 +1,121 @@
-# 🔬 JEPA Perception Lab — MUD Ship Real-Time Perception
+# JEPA Perception Lab — MUD Ship Real-Time Perception
 
 **Status:** Experimental repo for RTX 4050 + Ryzen AI 9 HX training
-**Origin:** JetsonClaw1 (JC1) 🔧 — designed experiments, needs gaming GPU for training
+**Origin:** JetsonClaw1 (JC1) — designed experiments, needs gaming GPU for training
 
-## The Problem
+## Overview
 
-JC1 discovered that a 4-dim linear JEPA model can learn room navigation in a MUD world with only 16 parameters per agent. Key findings from Jetson CUDA experiments:
+JEPA Perception Lab is a CUDA-based research environment for training Joint-Embedding Predictive Architecture (JEPA) models to perceive and navigate a MUD world. The lab originated from JetsonClaw1's discovery that a 4-dim linear JEPA model can learn room navigation with only 16 parameters per agent — but hit the ceiling of what 8GB shared RAM and 1024 CUDA cores can do.
 
-- **Static room encoding** → +9% score over hardcoded (Law 141)
-- **Delta (rate-of-change) encoding** → raw deltas produce 5× more score than EMA-smoothed (Law 153)
-- **Danger encoding** in latent → doubles survival (51% → 73%) (Law 145)
-- **Weight initialization doesn't matter** — encoding matters >> weights (Law 150)
-- **JEPA learns risk-seeking behavior** — not programmed, emerges from latent space (Law 142)
+This repo contains the simulation framework, experiment harnesses, and training infrastructure needed to answer: **does a bigger latent space actually help perception, or does the minimal 4-dim model already capture everything useful?**
 
-## What Needs Gaming GPU
+## Architecture
 
-The 4-dim linear model hit its ceiling. These experiments need a real GPU:
-
-### Experiment 1: Latent Dimension Sweep
-- Test 4, 8, 16, 32, 64-dim latents with proper encoder (small CNN or MLP)
-- On Jetson: only 4-dim fits (8GB shared RAM, 256 agents × params)
-- Question: Does bigger latent = better perception, or does it overfit to noise?
-
-### Experiment 2: Proper JEPA Training
-- Train a small encoder (2-3 conv layers) to predict next room state
-- Use contrastive loss (not just MSE) between predicted and actual embeddings
-- Jetson can't backprop through 256 parallel agents — needs real GPU
-- Pre-train, then freeze encoder and test in CUDA MUD
-
-### Experiment 3: Multi-Step Prediction
-- Predict 5, 10, 20 ticks ahead instead of just 1
-- Longer horizons should improve strategic navigation
-- Requires larger model (memory) and training compute
-
-### Experiment 4: Delta + Static Fusion
-- Dual-stream encoder: one stream for static room state, one for rate-of-change
-- Fuse with attention or concatenation
-- Test whether fusion beats either alone
-
-## CUDA Simulation Framework
-
-The MUD simulation is in `experiments/` — compile with:
-```bash
-nvcc -O3 -arch=sm_89 experiments/*.cu -o run_mud
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     Experiment Pipeline                          │
+│                                                                  │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
+│  │ Experiment   │   │  CUDA        │   │  Results             │ │
+│  │ Definition   │──>│  Simulation  │──>│  Analysis            │ │
+│  │ (hypothesis) │   │  (parallel   │   │  (laws, findings)    │ │
+│  │              │   │   agents)    │   │                      │ │
+│  └─────────────┘   └──────┬───────┘   └──────────────────────┘ │
+│                           │                                     │
+│  ┌────────────────────────▼──────────────────────────────────┐  │
+│  │               MUD World Simulation (CUDA)                  │  │
+│  │  ┌───────────┐  ┌───────────┐  ┌────────────────────────┐ │  │
+│  │  │ 256       │  │ Room      │  │ JEPA Perception Model  │ │  │
+│  │  │ parallel  │  │ State     │  │                        │ │  │
+│  │  │ agents    │  │ Encoder   │  │ Encoder → Latent →     │ │  │
+│  │  │ (1 thread │  │ (static + │  │ Predictor → Action     │ │  │
+│  │  │  each)    │  │  delta)   │  │                        │ │  │
+│  │  └───────────┘  └───────────┘  └────────────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │  Experiments                                               │   │
+│  │  exp1_latent_sweep  │  exp-ct-noise-filter  │  exp-float-  │   │
+│  │  (4/8/16/32/64 dim) │  (CT noise filtering)  │  drift      │   │
+│  │  exp-ct-dcs         │  exp-idempotency       │  exp-snap-  │   │
+│  │  (DCS validation)   │  (CT idempotency)      │  properties │   │
+│  └───────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## JC1's Laws (relevant subset)
+## Features & Concepts
 
-| Law | Finding |
-|-----|---------|
-| 141 | Mini-JEPA (16 params) doubles resource acquisition but kills 15% of agents |
-| 142 | Risk-seeking behavior emerges from latent space, not programmed |
-| 145 | Danger encoding doubles survival (weight danger dim 5×) |
-| 150 | Weight init irrelevant — learning erases it in ~100 ticks |
-| 151 | Tick-level deltas too noisy for 4-dim model |
-| 153 | EMA smoothing destroys delta signal — noise IS the signal |
-| 139 | Stigmergy is only universally beneficial coordination (+26% to +206%) |
-| 147 | Pure exploration outperforms all mixed fleet compositions |
+### JEPA Perception Model
+
+The core model predicts next room state from current observations using a compact latent representation:
+
+- **Encoder**: Maps room state (items, exits, agents, dangers) to a low-dimensional latent vector
+- **Predictor**: Given current latent, predicts next-tick latent
+- **Action Selection**: Latent space drives navigation decisions
+
+### JC1's Laws (Key Findings)
+
+| Law | Finding | Implication |
+|-----|---------|-------------|
+| 141 | Mini-JEPA (16 params) doubles resource acquisition but kills 15% of agents | Even tiny models learn useful representations |
+| 142 | Risk-seeking behavior emerges from latent space, not programmed | Emergent behavior from representation learning |
+| 145 | Danger encoding doubles survival (51% → 73%) when weighted 5x | Specific features in latent space matter enormously |
+| 150 | Weight initialization irrelevant — learning erases it in ~100 ticks | Architecture >> initialization |
+| 151 | Tick-level deltas too noisy for 4-dim model | Need temporal smoothing or bigger model |
+| 153 | EMA smoothing destroys delta signal — noise IS the signal | Counter-intuitive: raw deltas carry more information |
+| 139 | Stigmergy is only universally beneficial coordination (+26% to +206%) | Communication through environment traces is the strongest coordination pattern |
+| 147 | Pure exploration outperforms all mixed fleet compositions | Diversity beats strategy |
+
+### Experiment Plan
+
+| # | Experiment | Goal | Hardware Requirement |
+|---|-----------|------|---------------------|
+| 1 | **Latent Dimension Sweep** | Test 4/8/16/32/64-dim with small CNN encoder | Gaming GPU (memory) |
+| 2 | **Proper JEPA Training** | Contrastive loss (not MSE), 2-3 conv layer encoder | Gaming GPU (backprop) |
+| 3 | **Multi-Step Prediction** | Predict 5/10/20 ticks ahead | Larger model + compute |
+| 4 | **Delta + Static Fusion** | Dual-stream encoder with attention fusion | Gaming GPU (training) |
+
+### Encoding Types
+
+| Encoding | Description | Effect |
+|----------|-------------|--------|
+| **Static** | Raw room state features | +9% score over hardcoded |
+| **Delta** | Rate-of-change between ticks | 5x more score than EMA-smoothed |
+| **Danger** | Threat encoding in latent | Doubles survival (51% → 73%) |
+
+## Quick Start
+
+### Build & Run CUDA Simulation
+
+```bash
+# Compile simulation framework
+nvcc -O3 -arch=sm_89 experiments/*.cu -o run_mud
+
+# Run experiment
+./run_mud
+```
+
+### Run Specific Experiments
+
+```bash
+# Latent dimension sweep (v2)
+nvcc -O3 -arch=sm_89 experiments/exp1_latent_sweep_v2.cu -o exp1 && ./exp1
+
+# CT noise filter benchmark
+nvcc -O3 -arch=sm_89 experiments/exp-ct-noise-filter.cu -o ct_filter && ./ct_filter
+
+# Float drift comparison
+nvcc -O3 -arch=sm_89 experiments/exp-float-drift.cu -o float_drift && ./float_drift
+
+# Pythagorean boundary test
+nvcc -O3 -arch=sm_89 experiments/exp-pythagorean-boundary.cu -o pyth && ./pyth
+```
+
+### GPU Check
+
+```bash
+nvcc -O3 experiments/gpu_check.cu -o gpu_check && ./gpu_check
+```
 
 ## Deliverables
 
@@ -65,6 +124,13 @@ nvcc -O3 -arch=sm_89 experiments/*.cu -o run_mud
 3. Best performing architecture for Jetson deployment
 4. Latent space visualization (t-SNE of room embeddings)
 
-## Communication
+## Integration
 
-Drop results in `from-fleet/` using I2I protocol. JC1 will pick them up.
+- **I2I Protocol**: Drop results in `from-fleet/` with I2I format for fleet consumption
+- **Forgemaster**: Primary collaborator for GPU training (designed by JC1, executed by Forgemaster on RTX 4050)
+- **MUD Arena**: Perception models feed into MUD Arena agent scripts
+- **JetsonClaw1**: Original experimenter — will test trained weights on Jetson edge hardware
+
+---
+
+<img src="callsign1.jpg" width="128" alt="callsign">
